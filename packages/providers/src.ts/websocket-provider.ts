@@ -44,7 +44,7 @@ export type Subscription = {
 //   https://geth.ethereum.org/docs/rpc/pubsub
 
 export class WebSocketProvider extends JsonRpcProvider {
-    readonly _websocket: any;
+    readonly _websocket: WebSocket;
     readonly _requests: { [ name: string ]: InflightRequest };
     readonly _detectNetwork: Promise<Network>;
 
@@ -83,8 +83,8 @@ export class WebSocketProvider extends JsonRpcProvider {
             });
         };
 
-        this._websocket.onmessage = (messageEvent: { data: string }) => {
-            const data = messageEvent.data;
+        this._websocket.onmessage = (messageEvent: WebSocket.MessageEvent) => {
+            const data = messageEvent.data.toString();
             const result = JSON.parse(data);
             if (result.id != null) {
                 const id = String(result.id);
