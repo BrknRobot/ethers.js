@@ -64,6 +64,7 @@
     "@types/mocha": "^5.2.0",
     "@types/node": "^12.7.4",
     "@types/semver": "^7.3.4",
+    "@types/ws": "^7.4.6",
     "aes-js": "3.0.0",
     "aws-sdk": "2.137.0",
     "diff": "4.0.1",
@@ -99,6 +100,6 @@
     "scrypt-js": "3.0.1",
     "solc": "0.7.1",
     "tiny-inflate": "1.0.3",
-    "ws": "7.4.6"
+    "ws": "7.5.2"
   }
 }

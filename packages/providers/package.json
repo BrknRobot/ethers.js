@@ -32,7 +32,11 @@
     "@ethersproject/transactions": "^5.4.0",
     "@ethersproject/web": "^5.4.0",
     "bech32": "1.1.4",
-    "ws": "7.4.6"
+    "ws": "7.5.2"
+  },
+  "optionalDependencies": {
+    "bufferutil": "^4.0.3",
+    "utf-8-validate": "^5.0.5"
   },
   "description": "Ethereum Providers for ethers.",
   "ethereum": "donations.ethers.eth",
