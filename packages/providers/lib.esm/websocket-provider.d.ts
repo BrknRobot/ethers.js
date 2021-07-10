@@ -1,4 +1,5 @@
 import { Network, Networkish } from "@ethersproject/networks";
+import { ConnectionInfo } from "@ethersproject/web";
 import { Event } from "./base-provider";
 import { JsonRpcProvider } from "./json-rpc-provider";
 export declare type InflightRequest = {
@@ -9,20 +10,24 @@ export declare type Subscription = {
     tag: string;
     processFunc: (payload: any) => void;
 };
+export declare type WebSocketConnectionInfo = ConnectionInfo & {
+    reconnect?: boolean;
+    reconnectInterval?: number;
+};
 export declare class WebSocketProvider extends JsonRpcProvider {
-    readonly _websocket: any;
+    readonly connection: WebSocketConnectionInfo;
+    private _websocket;
     readonly _requests: {
         [name: string]: InflightRequest;
     };
     readonly _detectNetwork: Promise<Network>;
-    readonly _subIds: {
-        [tag: string]: Promise<string>;
-    };
-    readonly _subs: {
-        [name: string]: Subscription;
-    };
-    _wsReady: boolean;
-    constructor(url: string, network?: Networkish);
+    readonly _subIds: Map<string, Promise<string>>;
+    readonly _subs: Map<string, Subscription>;
+    private get _wsReady();
+    private _wsHeartbeatTimeout?;
+    constructor(url?: WebSocketConnectionInfo | string, network?: Networkish);
+    private setupConnection;
+    private heartbeat;
     detectNetwork(): Promise<Network>;
     get pollingInterval(): number;
     resetEventsBlock(blockNumber: number): void;
@@ -35,5 +40,12 @@ export declare class WebSocketProvider extends JsonRpcProvider {
     _startEvent(event: Event): void;
     _stopEvent(event: Event): void;
     destroy(): Promise<void>;
+    /**
+     * WebSocket event handlers
+     */
+    private onopen;
+    private onmessage;
+    private onclose;
+    private onerror;
 }
 //# sourceMappingURL=websocket-provider.d.ts.map

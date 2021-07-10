@@ -3,6 +3,7 @@
 import { BigNumber } from "@ethersproject/bignumber";
 import { Network, Networkish } from "@ethersproject/networks";
 import { defineReadOnly } from "@ethersproject/properties";
+import { ConnectionInfo } from "@ethersproject/web";
 
 import { Event } from "./base-provider";
 import { JsonRpcProvider } from "./json-rpc-provider";
@@ -39,24 +40,36 @@ export type Subscription = {
     processFunc: (payload: any) => void;
 };
 
+export type WebSocketConnectionInfo = ConnectionInfo & {
+    reconnect?:boolean,
+    reconnectInterval?:number,
+}
+
+const defaultConnectionInfo:Partial<WebSocketConnectionInfo> = {
+    reconnect:false,
+    reconnectInterval:5000,
+}
 
 // For more info about the Real-time Event API see:
 //   https://geth.ethereum.org/docs/rpc/pubsub
 
 export class WebSocketProvider extends JsonRpcProvider {
-    readonly _websocket: WebSocket;
+    declare readonly connection:WebSocketConnectionInfo;
+
+    private _websocket: WebSocket;
     readonly _requests: { [ name: string ]: InflightRequest };
     readonly _detectNetwork: Promise<Network>;
 
     // Maps event tag to subscription ID (we dedupe identical events)
-    readonly _subIds: { [ tag: string ]: Promise<string> };
+    readonly _subIds: Map<string,Promise<string>>;
 
     // Maps Subscription ID to Subscription
-    readonly _subs: { [ name: string ]: Subscription };
+    readonly _subs: Map<string,Subscription>;
 
-    _wsReady: boolean;
+    private get _wsReady() { return this._websocket?.readyState === WebSocket.OPEN };
+    private _wsHeartbeatTimeout?:NodeJS.Timeout;
 
-    constructor(url: string, network?: Networkish) {
+    constructor(url?: WebSocketConnectionInfo | string, network?: Networkish) {
         // This will be added in the future; please open an issue to expedite
         if (network === "any") {
             logger.throwError("WebSocketProvider does not support 'any' network yet", Logger.errors.UNSUPPORTED_OPERATION, {
@@ -64,76 +77,16 @@ export class WebSocketProvider extends JsonRpcProvider {
             });
         }
 
-        super(url, network);
+        const _connection:WebSocketConnectionInfo = { ...defaultConnectionInfo, ...(typeof url === 'object' ? url : {url:url}) };
+        super(_connection, network);
+
         this._pollingInterval = -1;
 
-        this._wsReady = false;
-
-        defineReadOnly(this, "_websocket", new WebSocket(this.connection.url));
+        this.setupConnection();
         defineReadOnly(this, "_requests", { });
-        defineReadOnly(this, "_subs", { });
-        defineReadOnly(this, "_subIds", { });
+        defineReadOnly(this, "_subs", new Map());
+        defineReadOnly(this, "_subIds", new Map());
         defineReadOnly(this, "_detectNetwork", super.detectNetwork());
-
-        // Stall sending requests until the socket is open...
-        this._websocket.onopen = () => {
-            this._wsReady = true;
-            Object.keys(this._requests).forEach((id) => {
-                this._websocket.send(this._requests[id].payload);
-            });
-        };
-
-        this._websocket.onmessage = (messageEvent: WebSocket.MessageEvent) => {
-            const data = messageEvent.data.toString();
-            const result = JSON.parse(data);
-            if (result.id != null) {
-                const id = String(result.id);
-                const request = this._requests[id];
-                delete this._requests[id];
-
-                if (result.result !== undefined) {
-                    request.callback(null, result.result);
-
-                    this.emit("debug", {
-                        action: "response",
-                        request: JSON.parse(request.payload),
-                        response: result.result,
-                        provider: this
-                    });
-
-                } else {
-                    let error: Error = null;
-                    if (result.error) {
-                        error = new Error(result.error.message || "unknown error");
-                        defineReadOnly(<any>error, "code", result.error.code || null);
-                        defineReadOnly(<any>error, "response", data);
-                    } else {
-                        error = new Error("unknown error");
-                    }
-
-                    request.callback(error, undefined);
-
-                    this.emit("debug", {
-                        action: "response",
-                        error: error,
-                        request: JSON.parse(request.payload),
-                        provider: this
-                    });
-
-                }
-
-            } else if (result.method === "eth_subscription") {
-                // Subscription...
-                const sub = this._subs[result.params.subscription];
-                if (sub) {
-                    //this.emit.apply(this,                  );
-                    sub.processFunc(result.params.result)
-                }
-
-            } else {
-                console.warn("this should not happen");
-            }
-        };
 
         // This Provider does not actually poll, but we want to trigger
         // poll events for things that depend on them (like stalling for
@@ -142,6 +95,26 @@ export class WebSocketProvider extends JsonRpcProvider {
             this.emit("poll");
         }, 1000);
         if (fauxPoll.unref) { fauxPoll.unref(); }
+    }
+
+    private setupConnection() {
+        this._websocket = new WebSocket(this.connection.url, {
+            'headers': this.connection.headers,
+            'timeout': this.connection.timeout,
+        });
+
+        // Stall sending requests until the socket is open...
+        this._websocket.onopen = this.onopen;
+        this._websocket.onmessage = this.onmessage;
+        this._websocket.onclose = this.onclose;
+        this._websocket.onerror = this.onerror;
+    }
+
+    private heartbeat() {
+        clearTimeout(this._wsHeartbeatTimeout);
+        this._wsHeartbeatTimeout = setTimeout(() => {
+            this._websocket.terminate();
+        }, this.connection.timeout);
     }
 
     detectNetwork(): Promise<Network> {
@@ -209,15 +182,15 @@ export class WebSocketProvider extends JsonRpcProvider {
     }
 
     async _subscribe(tag: string, param: Array<any>, processFunc: (result: any) => void): Promise<void> {
-        let subIdPromise = this._subIds[tag];
+        let subIdPromise = this._subIds.get(tag);
         if (subIdPromise == null) {
             subIdPromise = Promise.all(param).then((param) => {
                 return this.send("eth_subscribe", param);
             });
-            this._subIds[tag] = subIdPromise;
+            this._subIds.set(tag, subIdPromise);
         }
         const subId = await subIdPromise;
-        this._subs[subId] = { tag, processFunc };
+        this._subs.set(subId, { tag, processFunc });
     }
 
     _startEvent(event: Event): void {
@@ -293,13 +266,12 @@ export class WebSocketProvider extends JsonRpcProvider {
             return;
         }
 
-        const subId = this._subIds[tag];
+        const subId = this._subIds.get(tag);
         if (!subId) { return; }
 
-       delete this._subIds[tag];
+       this._subIds.delete(tag);
        subId.then((subId) => {
-            if (!this._subs[subId]) { return; }
-            delete this._subs[subId];
+            if (!this._subs.delete(subId)) { return; }
             this.send("eth_unsubscribe", [ subId ]);
         });
     }
@@ -321,5 +293,86 @@ export class WebSocketProvider extends JsonRpcProvider {
         // Hangup
         // See: https://developer.mozilla.org/en-US/docs/Web/API/CloseEvent#Status_codes
         this._websocket.close(1000);
+    }
+
+
+    /**
+     * WebSocket event handlers
+     */
+
+    private onopen(openEvent:WebSocket.OpenEvent) {
+        this.heartbeat();
+        Object.keys(this._requests).forEach((id) => {
+            this._websocket.send(this._requests[id].payload);
+        });
+        this._events.forEach((event) => {
+            if (!this._subs.has(event.tag))
+                this._startEvent(event);
+        });
+    }
+
+    private onmessage(messageEvent: WebSocket.MessageEvent) {
+        this.heartbeat();
+        const data = messageEvent.data.toString();
+        const result = JSON.parse(data);
+        if (result.id != null) {
+            const id = String(result.id);
+            const request = this._requests[id];
+            delete this._requests[id];
+
+            if (result.result !== undefined) {
+                request.callback(null, result.result);
+
+                this.emit("debug", {
+                    action: "response",
+                    request: JSON.parse(request.payload),
+                    response: result.result,
+                    provider: this
+                });
+
+            } else {
+                let error: Error = null;
+                if (result.error) {
+                    error = new Error(result.error.message || "unknown error");
+                    defineReadOnly(<any>error, "code", result.error.code || null);
+                    defineReadOnly(<any>error, "response", data);
+                } else {
+                    error = new Error("unknown error");
+                }
+
+                request.callback(error, undefined);
+
+                this.emit("debug", {
+                    action: "response",
+                    error: error,
+                    request: JSON.parse(request.payload),
+                    provider: this
+                });
+
+            }
+
+        } else if (result.method === "eth_subscription") {
+            // Subscription...
+            const sub = this._subs.get(result.params.subscription);
+            if (sub) {
+                //this.emit.apply(this,                  );
+                sub.processFunc(result.params.result)
+            }
+
+        } else {
+            console.warn("this should not happen");
+        }
+    }
+
+    private onclose(closeEvent:WebSocket.CloseEvent) {
+        clearTimeout(this._wsHeartbeatTimeout);
+    }
+
+    private onerror(errorEvent:WebSocket.ErrorEvent) {
+        if (this.connection.reconnect) {
+            setTimeout(() => {
+                this.setupConnection();
+            }, this.connection.reconnectInterval);
+        }
     }
 }

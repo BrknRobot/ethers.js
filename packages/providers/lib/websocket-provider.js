@@ -14,6 +14,17 @@ var __extends = (this && this.__extends) || (function () {
         d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
     };
 })();
+var __assign = (this && this.__assign) || function () {
+    __assign = Object.assign || function(t) {
+        for (var s, i = 1, n = arguments.length; i < n; i++) {
+            s = arguments[i];
+            for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p))
+                t[p] = s[p];
+        }
+        return t;
+    };
+    return __assign.apply(this, arguments);
+};
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -74,6 +85,10 @@ var logger = new logger_1.Logger(_version_1.version);
  *  with each other.
  */
 var NextId = 1;
+var defaultConnectionInfo = {
+    reconnect: false,
+    reconnectInterval: 5000,
+};
 // For more info about the Real-time Event API see:
 //   https://geth.ethereum.org/docs/rpc/pubsub
 var WebSocketProvider = /** @class */ (function (_super) {
@@ -86,68 +101,14 @@ var WebSocketProvider = /** @class */ (function (_super) {
                 operation: "network:any"
             });
         }
-        _this = _super.call(this, url, network) || this;
+        var _connection = __assign(__assign({}, defaultConnectionInfo), (typeof url === 'object' ? url : { url: url }));
+        _this = _super.call(this, _connection, network) || this;
         _this._pollingInterval = -1;
-        _this._wsReady = false;
-        properties_1.defineReadOnly(_this, "_websocket", new ws_1.WebSocket(_this.connection.url));
+        _this.setupConnection();
         properties_1.defineReadOnly(_this, "_requests", {});
-        properties_1.defineReadOnly(_this, "_subs", {});
-        properties_1.defineReadOnly(_this, "_subIds", {});
+        properties_1.defineReadOnly(_this, "_subs", new Map());
+        properties_1.defineReadOnly(_this, "_subIds", new Map());
         properties_1.defineReadOnly(_this, "_detectNetwork", _super.prototype.detectNetwork.call(_this));
-        // Stall sending requests until the socket is open...
-        _this._websocket.onopen = function () {
-            _this._wsReady = true;
-            Object.keys(_this._requests).forEach(function (id) {
-                _this._websocket.send(_this._requests[id].payload);
-            });
-        };
-        _this._websocket.onmessage = function (messageEvent) {
-            var data = messageEvent.data;
-            var result = JSON.parse(data);
-            if (result.id != null) {
-                var id = String(result.id);
-                var request = _this._requests[id];
-                delete _this._requests[id];
-                if (result.result !== undefined) {
-                    request.callback(null, result.result);
-                    _this.emit("debug", {
-                        action: "response",
-                        request: JSON.parse(request.payload),
-                        response: result.result,
-                        provider: _this
-                    });
-                }
-                else {
-                    var error = null;
-                    if (result.error) {
-                        error = new Error(result.error.message || "unknown error");
-                        properties_1.defineReadOnly(error, "code", result.error.code || null);
-                        properties_1.defineReadOnly(error, "response", data);
-                    }
-                    else {
-                        error = new Error("unknown error");
-                    }
-                    request.callback(error, undefined);
-                    _this.emit("debug", {
-                        action: "response",
-                        error: error,
-                        request: JSON.parse(request.payload),
-                        provider: _this
-                    });
-                }
-            }
-            else if (result.method === "eth_subscription") {
-                // Subscription...
-                var sub = _this._subs[result.params.subscription];
-                if (sub) {
-                    //this.emit.apply(this,                  );
-                    sub.processFunc(result.params.result);
-                }
-            }
-            else {
-                console.warn("this should not happen");
-            }
-        };
         // This Provider does not actually poll, but we want to trigger
         // poll events for things that depend on them (like stalling for
         // block and transaction lookups)
@@ -159,6 +120,30 @@ var WebSocketProvider = /** @class */ (function (_super) {
         }
         return _this;
     }
+    Object.defineProperty(WebSocketProvider.prototype, "_wsReady", {
+        get: function () { var _a; return ((_a = this._websocket) === null || _a === void 0 ? void 0 : _a.readyState) === ws_1.WebSocket.OPEN; },
+        enumerable: false,
+        configurable: true
+    });
+    ;
+    WebSocketProvider.prototype.setupConnection = function () {
+        this._websocket = new ws_1.WebSocket(this.connection.url, {
+            'headers': this.connection.headers,
+            'timeout': this.connection.timeout,
+        });
+        // Stall sending requests until the socket is open...
+        this._websocket.onopen = this.onopen;
+        this._websocket.onmessage = this.onmessage;
+        this._websocket.onclose = this.onclose;
+        this._websocket.onerror = this.onerror;
+    };
+    WebSocketProvider.prototype.heartbeat = function () {
+        var _this = this;
+        clearTimeout(this._wsHeartbeatTimeout);
+        this._wsHeartbeatTimeout = setTimeout(function () {
+            _this._websocket.terminate();
+        }, this.connection.timeout);
+    };
     WebSocketProvider.prototype.detectNetwork = function () {
         return this._detectNetwork;
     };
@@ -235,17 +220,17 @@ var WebSocketProvider = /** @class */ (function (_super) {
             return __generator(this, function (_a) {
                 switch (_a.label) {
                     case 0:
-                        subIdPromise = this._subIds[tag];
+                        subIdPromise = this._subIds.get(tag);
                         if (subIdPromise == null) {
                             subIdPromise = Promise.all(param).then(function (param) {
                                 return _this.send("eth_subscribe", param);
                             });
-                            this._subIds[tag] = subIdPromise;
+                            this._subIds.set(tag, subIdPromise);
                         }
                         return [4 /*yield*/, subIdPromise];
                     case 1:
                         subId = _a.sent();
-                        this._subs[subId] = { tag: tag, processFunc: processFunc };
+                        this._subs.set(subId, { tag: tag, processFunc: processFunc });
                         return [2 /*return*/];
                 }
             });
@@ -321,16 +306,15 @@ var WebSocketProvider = /** @class */ (function (_super) {
             // There are remaining event listeners
             return;
         }
-        var subId = this._subIds[tag];
+        var subId = this._subIds.get(tag);
         if (!subId) {
             return;
         }
-        delete this._subIds[tag];
+        this._subIds.delete(tag);
         subId.then(function (subId) {
-            if (!_this._subs[subId]) {
+            if (!_this._subs.delete(subId)) {
                 return;
             }
-            delete _this._subs[subId];
             _this.send("eth_unsubscribe", [subId]);
         });
     };
@@ -360,6 +344,79 @@ var WebSocketProvider = /** @class */ (function (_super) {
                 }
             });
         });
+    };
+    /**
+     * WebSocket event handlers
+     */
+    WebSocketProvider.prototype.onopen = function (openEvent) {
+        var _this = this;
+        this.heartbeat();
+        Object.keys(this._requests).forEach(function (id) {
+            _this._websocket.send(_this._requests[id].payload);
+        });
+        this._events.forEach(function (event) {
+            if (!_this._subs.has(event.tag))
+                _this._startEvent(event);
+        });
+    };
+    WebSocketProvider.prototype.onmessage = function (messageEvent) {
+        this.heartbeat();
+        var data = messageEvent.data.toString();
+        var result = JSON.parse(data);
+        if (result.id != null) {
+            var id = String(result.id);
+            var request = this._requests[id];
+            delete this._requests[id];
+            if (result.result !== undefined) {
+                request.callback(null, result.result);
+                this.emit("debug", {
+                    action: "response",
+                    request: JSON.parse(request.payload),
+                    response: result.result,
+                    provider: this
+                });
+            }
+            else {
+                var error = null;
+                if (result.error) {
+                    error = new Error(result.error.message || "unknown error");
+                    properties_1.defineReadOnly(error, "code", result.error.code || null);
+                    properties_1.defineReadOnly(error, "response", data);
+                }
+                else {
+                    error = new Error("unknown error");
+                }
+                request.callback(error, undefined);
+                this.emit("debug", {
+                    action: "response",
+                    error: error,
+                    request: JSON.parse(request.payload),
+                    provider: this
+                });
+            }
+        }
+        else if (result.method === "eth_subscription") {
+            // Subscription...
+            var sub = this._subs.get(result.params.subscription);
+            if (sub) {
+                //this.emit.apply(this,                  );
+                sub.processFunc(result.params.result);
+            }
+        }
+        else {
+            console.warn("this should not happen");
+        }
+    };
+    WebSocketProvider.prototype.onclose = function (closeEvent) {
+        clearTimeout(this._wsHeartbeatTimeout);
+    };
+    WebSocketProvider.prototype.onerror = function (errorEvent) {
+        var _this = this;
+        if (this.connection.reconnect) {
+            setTimeout(function () {
+                _this.setupConnection();
+            }, this.connection.reconnectInterval);
+        }
     };
     return WebSocketProvider;
 }(json_rpc_provider_1.JsonRpcProvider));
